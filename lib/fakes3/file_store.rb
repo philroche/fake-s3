@@ -82,8 +82,8 @@ module FakeS3
         #real_obj.io = File.open(File.join(obj_root,"content"),'rb')
         real_obj.io = RateLimitableFile.open(File.join(obj_root,"content"),'rb')
         real_obj.size = metadata.fetch(:size) { 0 }
-        real_obj.creation_date = File.ctime(obj_root).utc.iso8601()
-        real_obj.modified_date = metadata.fetch(:modified_date) { File.mtime(File.join(obj_root,"content")).utc.iso8601() }
+        real_obj.creation_date = File.ctime(obj_root).utc().iso8601()
+        real_obj.modified_date = metadata.fetch(:modified_date) { File.mtime(File.join(obj_root,"content")).utc().iso8601() }
         return real_obj
       rescue
         puts $!
@@ -95,7 +95,7 @@ module FakeS3
     def object_metadata(bucket,object)
     end
 
-    def copy_object(src_bucket_name,src_name,dst_bucket_name,dst_name,request)
+    def copy_object(src_bucket_name,src_name,dst_bucket_name,dst_name)
       src_root = File.join(@root,src_bucket_name,src_name,SHUCK_METADATA_DIR)
       src_metadata_filename = File.join(src_root,"metadata")
       src_metadata = YAML.load(File.open(src_metadata_filename,'rb').read)
@@ -110,25 +110,15 @@ module FakeS3
       content = File.join(metadata_dir,"content")
       metadata = File.join(metadata_dir,"metadata")
 
-      if src_bucket_name != dst_bucket_name || src_name != dst_name
-        File.open(content,'wb') do |f|
-          File.open(src_content_filename,'rb') do |input|
-            f << input.read
-          end
-        end
-
-        File.open(metadata,'w') do |f|
-          File.open(src_metadata_filename,'r') do |input|
-            f << input.read
-          end
+      File.open(content,'wb') do |f|
+        File.open(src_content_filename,'rb') do |input|
+          f << input.read
         end
       end
 
-      metadata_directive = request.header["x-amz-metadata-directive"].first
-      if metadata_directive == "REPLACE"
-        metadata_struct = create_metadata(content,request)
-        File.open(metadata,'w') do |f|
-          f << YAML::dump(metadata_struct)
+      File.open(metadata,'w') do |f|
+        File.open(src_metadata_filename,'r') do |input|
+          f << input.read
         end
       end
 
@@ -159,25 +149,22 @@ module FakeS3
         content = File.join(filename,SHUCK_METADATA_DIR,"content")
         metadata = File.join(filename,SHUCK_METADATA_DIR,"metadata")
 
+        md5 = Digest::MD5.new
         # TODO put a tmpfile here first and mv it over at the end
 
-        match=request.content_type.match(/^multipart\/form-data; boundary=(.+)/)
-      	boundary = match[1] if match
-        if boundary
-          boundary = WEBrick::HTTPUtils::dequote(boundary)
-          filedata = WEBrick::HTTPUtils::parse_form_data(request.body, boundary)
-          raise HTTPStatus::BadRequest if filedata['file'].empty?
-          File.open(content, 'wb') do |f|
-            f << filedata['file']
-          end
-        else
-          File.open(content,'wb') do |f|
-            request.body do |chunk|
-              f << chunk
-            end
+        File.open(content,'wb') do |f|
+          request.body do |chunk|
+            f << chunk
+            md5 << chunk
           end
         end
-        metadata_struct = create_metadata(content,request)
+
+        metadata_struct = {}
+        metadata_struct[:md5] = md5.hexdigest
+        metadata_struct[:content_type] = request.header["content-type"].first
+        metadata_struct[:size] = File.size(content)
+        metadata_struct[:modified_date] = File.mtime(content).utc().iso8601()
+
         File.open(metadata,'w') do |f|
           f << YAML::dump(metadata_struct)
         end
@@ -209,15 +196,6 @@ module FakeS3
         $!.backtrace.each { |line| puts line }
         return nil
       end
-    end
-
-    def create_metadata(content,request)
-      metadata = {}
-      metadata[:md5] = Digest::MD5.file(content).hexdigest
-      metadata[:content_type] = request.header["content-type"].first
-      metadata[:size] = File.size(content)
-      metadata[:modified_date] = File.mtime(content).utc.iso8601()
-      return metadata
     end
   end
 end
